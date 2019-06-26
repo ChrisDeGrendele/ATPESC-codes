@@ -9,12 +9,12 @@
 CXX = mpicxx
 FC = gfortran
 
-CPPFLAGS = -Ishared -I$(AMREX_INSTALL_DIR)/include -I$(SUNDIALS_INSTALL_DIR)/include
+CPPFLAGS = -Ishared -I$(AMREX_INSTALL_DIR)/include -I$(SUNDIALS_INSTALL_DIR)/include -I$(HYPRE_INSTALL_DIR)/include
 CXXFLAGS = -O2 -std=c++11
 FFLAGS = -O2
-LDFLAGS = -L$(AMREX_INSTALL_DIR)/lib -L$(SUNDIALS_INSTALL_DIR)/lib
+LDFLAGS = -L$(AMREX_INSTALL_DIR)/lib -L$(SUNDIALS_INSTALL_DIR)/lib -L$(HYPRE_INSTALL_DIR)/lib
 
-LIBRARIES = -lamrex -lsundials_cvode -lsundials_arkode
+LIBRARIES = -lamrex -lsundials_cvode -lsundials_arkode -lHYPRE
 
 LIBRARIES += -lgfortran
 

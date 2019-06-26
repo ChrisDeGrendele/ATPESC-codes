@@ -18,3 +18,23 @@ advCoeffy = 5.0e-4
 diffCoeffx = 2.0e-5
 diffCoeffy = 2.0e-5
 nls_method = 0
+
+# ------------------------------------------------------------------------------
+# Input parameters for AMReX MLMG interface used as a preconditioner
+# ------------------------------------------------------------------------------
+
+mlmg.agglomeration = 1
+mlmg.consolidation = 1
+mlmg.max_coarsening_level = 1000
+mlmg.linop_maxorder = 2
+mlmg.max_iter = 1000
+mlmg.max_fmg_iter = 1000
+mlmg.verbose = 1
+mlmg.bottom_verbose = 1
+mlmg.use_hypre = 1
+
+# 1 = Structed, 2 = Semi-Structed, 3 = IJ
+mlmg.hypre_interface = 3
+
+mlmg.use_petsc = 0
+mlmg.tol_rel = 1.0e-6

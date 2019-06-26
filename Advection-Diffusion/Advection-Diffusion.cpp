@@ -41,11 +41,20 @@ void DoProblem()
 
    // How Boxes are distrubuted among MPI processes
    DistributionMapping dm(ba);
+   prob_data.dmap = &dm;
 
    // Allocate the solution MultiFab
    int nGhost = 1;  // number of ghost cells for each array
    int nComp  = 1;  // number of components for each array
    MultiFab sol(ba, dm, nComp, nGhost);
+
+   // Allocate the linear solver coefficient MultiFabs
+   MultiFab acoef(ba, dm, nComp, nGhost);
+   MultiFab bcoef(ba, dm, nComp, nGhost);
+   acoef = 1.0;
+   bcoef = 1.0;
+   prob_data.acoef = &acoef;
+   prob_data.bcoef = &bcoef;
 
    // Build the flux MultiFabs
    Array<MultiFab, AMREX_SPACEDIM> flux;
@@ -302,6 +311,11 @@ void ParseInputs(ProblemOpt& prob_opt, ProblemData& prob_data)
    pp.query("write_diag", write_diag);
    prob_opt.write_diag = write_diag;
 
+   // Decide whether to use a preconditioner or not
+   int use_preconditioner = 0;
+   pp.query("use_preconditioner", use_preconditioner);
+   prob_opt.use_preconditioner = use_preconditioner;
+
    // --------------------------------------------------------------------------
    // Problem data
    // --------------------------------------------------------------------------
@@ -321,6 +335,21 @@ void ParseInputs(ProblemOpt& prob_opt, ProblemData& prob_data)
    pp.query("diffCoeffy", diffCoeffy);
    prob_data.diffCoeffx = diffCoeffx;
    prob_data.diffCoeffy = diffCoeffy;
+
+   // MLMG options
+   ParmParse ppmg("mlmg");
+   ppmg.query("agglomeration", prob_data.mg_agglomeration);
+   ppmg.query("consolidation", prob_data.mg_consolidation);
+   ppmg.query("max_coarsening_level", prob_data.mg_max_coarsening_level);
+   ppmg.query("linop_maxorder", prob_data.mg_linop_maxorder);
+   ppmg.query("max_iter", prob_data.mg_max_iter);
+   ppmg.query("max_fmg_iter", prob_data.mg_max_fmg_iter);
+   ppmg.query("verbose", prob_data.mg_verbose);
+   ppmg.query("bottom_verbose", prob_data.mg_bottom_verbose);
+   ppmg.query("use_hypre", prob_data.mg_use_hypre);
+   ppmg.query("hypre_interface", prob_data.mg_hypre_interface);
+   ppmg.query("use_petsc", prob_data.mg_use_petsc);
+   ppmg.query("tol_rel", prob_data.mg_tol_rel);
 
    // Ouput problem options and parameters
    amrex::Print()
@@ -385,6 +414,7 @@ void SetUpGeometry(BoxArray& ba, Geometry& geom,
    geom.define(domain, &real_box, CoordSys::cartesian, is_periodic.data());
 
    prob_data.geom = &geom;
+   prob_data.grid = &ba;
 }
 
 void ComputeSolutionCV(N_Vector nv_sol, ProblemOpt* prob_opt,
@@ -405,6 +435,7 @@ void ComputeSolutionCV(N_Vector nv_sol, ProblemOpt* prob_opt,
    Real      tfinal       = prob_opt->tfinal;
    Real      dtout        = prob_opt->dtout;
    int       max_steps    = prob_opt->max_steps;
+   int use_preconditioner = prob_opt->use_preconditioner;
 
    // initial time, number of outputs, and error flag
    Real time = 0.0;
@@ -461,12 +492,27 @@ void ComputeSolutionCV(N_Vector nv_sol, ProblemOpt* prob_opt,
    if (nls_method == 0)
    {
       // Create and attach GMRES linear solver for Newton
-      SUNLinearSolver LS = SUNLinSol_SPGMR(nv_sol, PREC_NONE, ls_max_iter);
+      SUNLinearSolver LS;
+      if (use_preconditioner)
+         LS = SUNLinSol_SPGMR(nv_sol, PREC_LEFT, ls_max_iter);
+      else
+         LS = SUNLinSol_SPGMR(nv_sol, PREC_NONE, ls_max_iter);
+
       ier = CVodeSetLinearSolver(cvode_mem, LS, NULL);
       if (ier != CVLS_SUCCESS)
       {
          amrex::Print() << "Creation of linear solver unsuccessful" << std::endl;
          return;
+      }
+
+      if (use_preconditioner) {
+         // Attach preconditioner setup/solve functions
+         ier = CVodeSetPreconditioner(cvode_mem, precondition_setup, precondition_solve);
+         if (ier != CVLS_SUCCESS)
+            {
+               amrex::Print() << "Attachment of preconditioner unsuccessful" << std::endl;
+               return;
+            }
       }
    }
    else
@@ -715,4 +761,108 @@ void ComputeSolutionARK(N_Vector nv_sol, ProblemOpt* prob_opt,
    // Close diagnostics file
    if (write_diag)
       fclose(diagfp);
+}
+
+int precondition_setup(realtype tn, N_Vector u, N_Vector fu,
+                       booleantype jok, booleantype *jcurPtr,
+                       realtype gamma, void *user_data)
+{
+  amrex::Print() << "in precondition_setup" << std::endl;
+  return(0);
+}
+
+int precondition_solve(realtype tn, N_Vector u, N_Vector fu,
+                       N_Vector r, N_Vector z,
+                       realtype gamma, realtype delta,
+                       int lr, void *user_data)
+{
+  amrex::Print() << "in precondition_solve" << std::endl;
+
+  ProblemData *prob_data = (ProblemData*) user_data;
+
+  auto geom = *(prob_data->geom);
+  auto grid = *(prob_data->grid);
+  auto dmap = *(prob_data->dmap);
+  auto& acoef = *(prob_data->acoef);
+  auto& bcoef = *(prob_data->acoef);
+
+  MultiFab* solution = NV_MFAB(z);
+  MultiFab* rhs = NV_MFAB(r);
+
+  LPInfo info;
+  info.setAgglomeration(prob_data->mg_agglomeration);
+  info.setConsolidation(prob_data->mg_consolidation);
+  info.setMaxCoarseningLevel(prob_data->mg_max_coarsening_level);
+
+  const Real tol_rel = 1.e-10;
+  const Real tol_abs = 0.0;
+
+  const int nlevels = 1;
+
+  const Real ascalar = 1.0;
+  const Real bscalar = gamma;
+
+  MLABecLaplacian mlabec({geom}, {grid}, {dmap}, info);
+
+  mlabec.setMaxOrder(prob_data->mg_linop_maxorder);
+
+  // Set periodic BC
+  mlabec.setDomainBC({AMREX_D_DECL(LinOpBCType::Periodic,
+                                   LinOpBCType::Periodic,
+                                   LinOpBCType::Periodic)},
+    {AMREX_D_DECL(LinOpBCType::Periodic,
+                  LinOpBCType::Periodic,
+                  LinOpBCType::Periodic)});
+
+  mlabec.setLevelBC(0, nullptr);
+
+  mlabec.setScalars(ascalar, bscalar);
+
+  mlabec.setACoeffs(0, acoef);
+
+  Array<MultiFab,AMREX_SPACEDIM> face_bcoef;
+  for (int idim = 0; idim < AMREX_SPACEDIM; ++idim)
+    {
+      const BoxArray& ba = amrex::convert(bcoef.boxArray(),
+                                          IntVect::TheDimensionVector(idim));
+      face_bcoef[idim].define(ba, bcoef.DistributionMap(), 1, 0);
+
+      switch (idim)
+         {
+            case 0:
+               face_bcoef[idim] = prob_data->diffCoeffx;
+            case 1:
+               face_bcoef[idim] = prob_data->diffCoeffy;
+         }
+    }
+
+  // amrex::average_cellcenter_to_face(GetArrOfPtrs(face_bcoef),
+  //                                   bcoef, geom);
+  mlabec.setBCoeffs(0, amrex::GetArrOfConstPtrs(face_bcoef));
+
+  MLMG mlmg(mlabec);
+  mlmg.setMaxIter(prob_data->mg_max_iter);
+  mlmg.setMaxFmgIter(prob_data->mg_max_fmg_iter);
+  mlmg.setVerbose(prob_data->mg_verbose);
+  mlmg.setBottomVerbose(prob_data->mg_bottom_verbose);
+#ifdef AMREX_USE_HYPRE
+  if (prob_data->mg_use_hypre) {
+    mlmg.setBottomSolver(MLMG::BottomSolver::hypre);
+    if (prob_data->mg_hypre_interface == 1)
+       mlmg.setHypreInterface(amrex::Hypre::Interface::structed);
+    else if (prob_data->mg_hypre_interface == 2)
+       mlmg.setHypreInterface(amrex::Hypre::Interface::semi_structed);
+    else
+       mlmg.setHypreInterface(amrex::Hypre::Interface::ij);
+  }
+#endif
+#ifdef AMREX_USE_PETSC
+  if (prob_data->mg_use_petsc) {
+    mlmg.setBottomSolver(MLMG::BottomSolver::petsc);
+  }
+#endif
+
+  mlmg.solve({solution}, {rhs}, prob_data->mg_tol_rel, tol_abs);
+
+  return(0);
 }
